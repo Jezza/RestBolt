@@ -46,7 +46,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -477,8 +476,16 @@ public final class RestBolt {
 						int slot = (type & SLOT_MASK) >> SLOT_SHIFT;
 
 						impl.visitVarInsn(op(ILOAD, sort), slot);
-						// @TODO Jezza - 23 Nov. 2018: Correctly convert this to a string, rather than just expecting this to work.
-						impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
+						if (sort == STRING) {
+							impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
+						} else if (sort == OBJECT) {
+							impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(Ljava/lang/Object;)Ljava/lang/StringBuilder;", false);
+						} else if (sort == ARRAY) {
+							throw new IllegalStateException("Not yet supported: ARRAY");
+						} else {
+							char character = PRIMITIVE_DESCRIPTORS.charAt(sort);
+							impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(" + character + ")Ljava/lang/StringBuilder;", false);
+						}
 						found = true;
 						break;
 					}
@@ -779,16 +786,18 @@ public final class RestBolt {
 		Service service = bind("http://localhost:8080", Service.class);
 //		service.pingSync0();
 		int size = 100;
-		List<CompletableFuture<?>> futures = new ArrayList<>(size);
-		for (int i = 0; i < size; i++) {
-			futures.add(service.pingAsync());
-		}
-
-		CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+//		List<CompletableFuture<?>> futures = new ArrayList<>(size);
+//		for (int i = 0; i < size; i++) {
+//			futures.add(service.pingAsync());
+//		}
+//		CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 
 //		String size = service.size();
 //		System.out.println(size);
-		System.out.println(service.count());
+//		System.out.println(service.count());
+
+		service.touch(123L);
+		service.touch(456L);
 	}
 
 	public static final class ServiceImpl { // implements Service
@@ -901,11 +910,14 @@ public final class RestBolt {
 		@Header(value = "User-Agent", data = "Rest-Bolt-UserAgent")
 		CompletableFuture<HttpResponse<String>> name(@Path("user") String id, @Query("sort") String sort, @Header("Auth") String auth);
 
+		@GET("/touch/{id}")
+		void touch(@Path("id") long id) throws SyncException;
+
 		@GET("/ping")
 		void ping(@Header("User-Agent") String userAgent) throws SyncException;
 
 		@GET("/ping")
-		CompletableFuture<?> pingAsync() throws SyncException;
+		CompletableFuture<?> pingAsync();
 
 		@GET("/ping")
 		void pingSync0() throws SyncException;
