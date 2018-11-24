@@ -1,0 +1,17 @@
+plugins {
+	id 'java'
+}
+
+group 'me.jezza.restbolt'
+version '1.0-SNAPSHOT'
+
+sourceCompatibility = 11
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	compile 'org.slf4j:slf4j-simple:1.7.25'
+	compile 'org.ow2.asm:asm:7.0'
+}
