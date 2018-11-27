@@ -1,4 +1,4 @@
-package me.jezza.restbolt.interfaces;
+package me.jezza.restbolt.annotations;
 
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;

@@ -1,18 +1,19 @@
-package me.jezza.restbolt.interfaces;
+package me.jezza.restbolt.annotations;
 
 import java.lang.annotation.ElementType;
-import java.lang.annotation.Repeatable;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
+import me.jezza.restbolt.RestBolt;
+
 /**
  * @author Jezza
  */
-@Target({ElementType.PARAMETER, ElementType.METHOD})
+@Target(ElementType.METHOD)
 @Retention(RetentionPolicy.RUNTIME)
-@Repeatable(Headers.class)
-public @interface Header {
+public @interface PATCH {
 	String value();
-	String data() default "";
+
+	String publisher() default RestBolt.PUBLISHER_URL_ENCODED;
 }

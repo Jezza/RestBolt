@@ -1,4 +1,4 @@
-package me.jezza.restbolt.interfaces;
+package me.jezza.restbolt.annotations;
 
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
@@ -10,6 +10,6 @@ import java.lang.annotation.Target;
  */
 @Target(ElementType.METHOD)
 @Retention(RetentionPolicy.RUNTIME)
-public @interface Headers {
-	Header[] value();
+public @interface DELETE {
+	String value();
 }

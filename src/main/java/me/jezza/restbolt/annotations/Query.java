@@ -1,4 +1,4 @@
-package me.jezza.restbolt.interfaces;
+package me.jezza.restbolt.annotations;
 
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
@@ -8,10 +8,8 @@ import java.lang.annotation.Target;
 /**
  * @author Jezza
  */
-@Target(ElementType.METHOD)
+@Target(ElementType.PARAMETER)
 @Retention(RetentionPolicy.RUNTIME)
-public @interface CUSTOM {
-	String method();
-
+public @interface Query {
 	String value();
 }
