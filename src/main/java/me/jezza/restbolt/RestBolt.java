@@ -130,6 +130,10 @@ public final class RestBolt {
 	private static final String HANDLER_INTERNAL = HANDLER_TYPE.getInternalName();
 	private static final String HANDLER_DESCRIPTOR = HANDLER_TYPE.getDescriptor();
 
+	private RestBolt() {
+		throw new IllegalStateException();
+	}
+
 	public static <T> T bind(String uri, Class<T> type, Lookup lookup) {
 		URI hostUri = URI.create(uri);
 		MethodHandle constructor = createImpl(type, lookup);

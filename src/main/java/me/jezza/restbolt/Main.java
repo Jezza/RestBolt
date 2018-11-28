@@ -15,7 +15,10 @@ import me.jezza.restbolt.annotations.Query;
 /**
  * @author Jezza
  */
-public class Main {
+public final class Main {
+	private Main() {
+		throw new IllegalStateException();
+	}
 
 	public static void main(String[] args) throws SyncException {
 		// @TODO Jezza - 24 Nov. 2018:
