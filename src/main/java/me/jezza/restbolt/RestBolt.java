@@ -1,12 +1,15 @@
 package me.jezza.restbolt;
 
+import static java.lang.invoke.MethodType.methodType;
 import static org.objectweb.asm.ClassWriter.COMPUTE_FRAMES;
 import static org.objectweb.asm.Opcodes.ALOAD;
 import static org.objectweb.asm.Opcodes.ARETURN;
 import static org.objectweb.asm.Opcodes.ASTORE;
 import static org.objectweb.asm.Opcodes.ATHROW;
 import static org.objectweb.asm.Opcodes.CHECKCAST;
+import static org.objectweb.asm.Opcodes.DRETURN;
 import static org.objectweb.asm.Opcodes.DUP;
+import static org.objectweb.asm.Opcodes.FRETURN;
 import static org.objectweb.asm.Opcodes.GETFIELD;
 import static org.objectweb.asm.Opcodes.GETSTATIC;
 import static org.objectweb.asm.Opcodes.IFNONNULL;
@@ -16,12 +19,15 @@ import static org.objectweb.asm.Opcodes.INVOKESPECIAL;
 import static org.objectweb.asm.Opcodes.INVOKESTATIC;
 import static org.objectweb.asm.Opcodes.INVOKEVIRTUAL;
 import static org.objectweb.asm.Opcodes.IRETURN;
+import static org.objectweb.asm.Opcodes.ISTORE;
+import static org.objectweb.asm.Opcodes.LRETURN;
 import static org.objectweb.asm.Opcodes.MONITORENTER;
 import static org.objectweb.asm.Opcodes.MONITOREXIT;
 import static org.objectweb.asm.Opcodes.NEW;
 import static org.objectweb.asm.Opcodes.PUTFIELD;
 import static org.objectweb.asm.Opcodes.RETURN;
 import static org.objectweb.asm.Opcodes.SWAP;
+import static org.objectweb.asm.Opcodes.V11;
 
 import java.io.IOException;
 import java.lang.annotation.Annotation;
@@ -29,8 +35,6 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodHandles.Lookup;
 import java.lang.invoke.MethodType;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Parameter;
@@ -41,7 +45,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpRequest.BodyPublisher;
 import java.net.http.HttpRequest.BodyPublishers;
-import java.net.http.HttpRequest.Builder;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandler;
 import java.net.http.HttpResponse.BodyHandlers;
@@ -58,8 +61,9 @@ import java.util.concurrent.CompletableFuture;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
-import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import me.jezza.restbolt.annotations.Body;
 import me.jezza.restbolt.annotations.CUSTOM;
@@ -78,15 +82,15 @@ import me.jezza.restbolt.annotations.TRACE;
  * @author Jezza
  */
 public final class RestBolt {
-	//	public static final String PUBLISHER_FACTORY_SIGNATURE = "(Ljava/net/http/HttpRequest$Builder;)Ljava/net/http/HttpRequest$BodyPublisher;";
-	public static final String PUBLISHER_FACTORY_SIGNATURE = "(Ljava/lang/reflect/Method;Lorg/objectweb/asm/MethodVisitor;[Ljava/lang/String;[II)V";
+	private static final Logger log = LoggerFactory.getLogger(RestBolt.class);
+	private static final String DEBUG_OUTPUT_FOLDER = RestBolt.class.getName().concat(".outputGenClass");
 
-	//	public static final String PUBLISHER_NO_BODY = "java/net/http/HttpRequest$BodyPublishers.noBody()Ljava/net/http/HttpRequest$BodyPublisher;";
-	public static final String PUBLISHER_NO_BODY = "me/jezza/restbolt/RestBolt.buildNoBody" + PUBLISHER_FACTORY_SIGNATURE;
-	public static final String PUBLISHER_URL_ENCODED = "me/jezza/restbolt/RestBolt.buildURLEncoded" + PUBLISHER_FACTORY_SIGNATURE;
+	public static final MethodType PUBLISHER_FACTORY_SIGNATURE = methodType(void.class, Method.class, MethodVisitor.class, String[].class, int[].class, int.class);
 
-	private static final Type OBJECT_TYPE = Type.getType(Object.class);
-	private static final String OBJECT_INTERNAL = OBJECT_TYPE.getInternalName();
+	public static final String PUBLISHER_NO_BODY = "me.jezza.restbolt.RestBolt.buildNoBody";
+	public static final String PUBLISHER_URL_ENCODED = "me.jezza.restbolt.RestBolt.buildURLEncoded";
+
+	private static final String OBJECT_INTERNAL = "java/lang/Object";
 
 	private static final Type STRING_TYPE = Type.getType(String.class);
 	private static final String STRING_INTERNAL = STRING_TYPE.getInternalName();
@@ -118,8 +122,6 @@ public final class RestBolt {
 	private static final String RESPONSE_INTERNAL = RESPONSE_TYPE.getInternalName();
 	private static final String RESPONSE_DESCRIPTOR = RESPONSE_TYPE.getDescriptor();
 
-	private static final Type BODY_PUBLISHERS_TYPE = Type.getType(BodyPublishers.class);
-
 	private static final Type PUBLISHER_TYPE = Type.getType(BodyPublisher.class);
 	private static final String PUBLISHER_INTERNAL = PUBLISHER_TYPE.getInternalName();
 	private static final String PUBLISHER_DESCRIPTOR = PUBLISHER_TYPE.getDescriptor();
@@ -128,21 +130,31 @@ public final class RestBolt {
 	private static final String HANDLER_INTERNAL = HANDLER_TYPE.getInternalName();
 	private static final String HANDLER_DESCRIPTOR = HANDLER_TYPE.getDescriptor();
 
-	private static final String URI_RESOLVE = '(' + STRING_DESCRIPTOR + ')' + URI_TYPE;
-	private static final String REQUEST_NEW_BUILDER = Type.getMethodDescriptor(REQUEST_BUILDER_TYPE, URI_TYPE);
+	public static <T> T bind(String uri, Class<T> type, Lookup lookup) {
+		URI hostUri = URI.create(uri);
+		MethodHandle constructor = createImpl(type, lookup);
+		try {
+			return (T) constructor.invoke(hostUri);
+		} catch (Throwable t) {
+			throw new IllegalStateException("Failed to instantiate class", t);
+		}
+	}
 
-	public static <T> T bind(String uri, Class<T> type) {
+	public static <T> Binder<T> binder(Class<T> type, Lookup lookup) {
+		MethodHandle constructor = createImpl(type, lookup);
+		return new Binder<>(constructor);
+	}
+
+	private static MethodHandle createImpl(Class<?> type, Lookup lookup) {
 		if (!type.isInterface()) {
 			throw new IllegalStateException("Type (\"" + type.getName() + "\" not an interface.");
 		}
-		URI hostUri = URI.create(uri);
-
 		String internalName = Type.getInternalName(type);
 		String generatedName = internalName.concat("Proxy");
 
 		ClassWriter writer = new ClassWriter(COMPUTE_FRAMES);
 
-		writer.visit(Opcodes.V11, Modifier.PUBLIC | Modifier.FINAL, generatedName, null, OBJECT_INTERNAL, new String[]{internalName});
+		writer.visit(V11, Modifier.PUBLIC | Modifier.FINAL, generatedName, null, OBJECT_INTERNAL, new String[]{internalName});
 
 		// private final URI host;
 		writer.visitField(Modifier.PRIVATE | Modifier.FINAL, "host", URI_DESCRIPTOR, null, null);
@@ -235,44 +247,38 @@ public final class RestBolt {
 			}
 
 			long start = System.nanoTime();
-			describe(writer, method, generatedName, verb, path, publisher);
+			writeMethod(lookup, writer, method, generatedName, verb, path, publisher);
 			long end = System.nanoTime();
 			long time = end - start;
 			total += time;
-			System.out.println(time + " ns = " + method.getName() + Type.getMethodDescriptor(method));
+			log.info(time + " ns = " + method.getName() + Type.getMethodDescriptor(method));
 		}
-		System.out.println(total + " ns = " + type.getName());
+		log.info(total + " ns = " + type.getName());
 
 		byte[] classData = writer.toByteArray();
 
-		try {
-			Files.write(Paths.get("C:\\Users\\Jezza\\Desktop\\JavaProjects\\rest-bolt\\" + generatedName.substring(generatedName.lastIndexOf('/') + 1) + ".class"), classData, StandardOpenOption.CREATE);
-		} catch (IOException e) {
-			e.printStackTrace();
+		String folder = System.getProperty(DEBUG_OUTPUT_FOLDER);
+		if (folder != null) {
+			String fileName = folder + generatedName.substring(generatedName.lastIndexOf('/') + 1) + ".class";
+			try {
+				Files.write(Paths.get(fileName), classData, StandardOpenOption.CREATE);
+			} catch (IOException e) {
+				log.warn("Failed to write generated class data to \"" + fileName + "\".", e);
+			}
 		}
 
 		Class<?> clazz;
 		try {
-			clazz = MethodHandles.lookup().defineClass(classData);
+			clazz = lookup.defineClass(classData);
 		} catch (IllegalAccessException e) {
 			throw new IllegalStateException("Failed to declare class", e);
 		}
 
-		Constructor<?> generatedConstructor;
 		try {
-			generatedConstructor = clazz.getDeclaredConstructor(URI.class);
-		} catch (NoSuchMethodException e) {
+			return lookup.findConstructor(clazz, methodType(void.class, URI.class));
+		} catch (NoSuchMethodException | IllegalAccessException e) {
+			// Shouldn't happen as we build the class with a constructor with this exact signature...
 			throw new IllegalStateException("Failed to locate constructor", e);
-		}
-
-		try {
-			return (T) generatedConstructor.newInstance(hostUri);
-		} catch (InstantiationException e) {
-			throw new IllegalStateException("Failed to instantiate class", e);
-		} catch (IllegalAccessException e) {
-			throw new IllegalStateException("Unable to access class", e);
-		} catch (InvocationTargetException e) {
-			throw new IllegalStateException("Failed to invoke constructor on generated class", e);
 		}
 	}
 
@@ -361,8 +367,9 @@ public final class RestBolt {
 	private static final String HTTP_RESPONSE = "java.net.http.HttpResponse";
 	private static final String VOID = "java.lang.Void";
 
-	private static void describe(ClassWriter writer, Method method, String generatedName, String verb, String path, String publisher) {
+	private static void writeMethod(Lookup lookup, ClassWriter writer, Method method, String generatedName, String verb, String path, String publisher) {
 		if (path.charAt(0) != '/') {
+			// Yeah, we could patch it up for them, but I'd rather enforce a consistent style then have to read a mixture of the two in source...
 			throw new IllegalStateException("Path must start with a '/'");
 		}
 
@@ -370,8 +377,15 @@ public final class RestBolt {
 		boolean response; // true, if the method is expecting the HttpResponse itself, and not just the value.
 		java.lang.reflect.Type responseType; // == null ? discarding
 		{
+			// Here be dragons...
+			// This isn't pretty, and I do want to pull it into a method, but I return three parameters, and I can't be fucked making a POJO for it, so Ima just leave it for now...
+			// I also don't want to put two booleans and a fucking pointer on the heap, just so I can return it...
+			// I want tuples... Rust as ruined me...
+			// Interestingly, this scope is actually the part that makes it too complex for IntelliJ to analyse.
+			// @TODO Jezza - 28 Nov. 2018: Yes, move this into another method _nicely_...
 			var returnType = method.getGenericReturnType();
 			if (returnType instanceof ParameterizedType) {
+				// Some parameterised type. (eg, Map<String, String>, List<String>, HttpResponse<?>, CompletableFuture<HttpResponse<String>>)
 				ParameterizedType parameterisedType = (ParameterizedType) returnType;
 				var raw = parameterisedType.getRawType();
 				if (raw == CompletableFuture.class) {
@@ -385,11 +399,12 @@ public final class RestBolt {
 					}
 					java.lang.reflect.Type argument = arguments[0];
 					String name = argument.getTypeName();
+					// If the type itself is a wildcard, then they couldn't give two shits about the response type, so we're just gonna discard the body and not care.
 					if (name.equals("?")) {
 						responseType = null;
 					} else if (name.startsWith(HTTP_RESPONSE)) {
 						if (!(argument instanceof ParameterizedType)) {
-							throw new AssertionError();
+							throw new AssertionError(HTTP_RESPONSE + " not parameterised.");
 						}
 						java.lang.reflect.Type[] responseArguments = ((ParameterizedType) argument).getActualTypeArguments();
 						if (responseArguments.length != 1) {
@@ -399,7 +414,8 @@ public final class RestBolt {
 					} else {
 						// Check if the generic actually returns back a HttpResponse, as that's what the client returns, and the person writing the interface
 						// could have easily forgot and just wrote something like "CompletableFuture<String>" instead of "CompletableFuture<HttpResponse<String>>".
-						throw new IllegalStateException("[ERROR] Return type must be of CompletableFuture<HttpResponse<_>> on \"" + method + "\".");
+						String methodDescription = method.getName() + Type.getMethodDescriptor(method);
+						throw new IllegalStateException("[ERROR] Return type must be of CompletableFuture<HttpResponse<_>> on \"" + methodDescription + "\".");
 					}
 				} else if (raw == HttpResponse.class) {
 					async = false;
@@ -427,23 +443,26 @@ public final class RestBolt {
 						: null;
 			}
 
-			Class<?>[] types = method.getExceptionTypes();
 			boolean found = false;
-			for (Class<?> exception : types) {
-				found = exception == SyncException.class;
-				if (found) {
+			for (Class<?> exceptionType : method.getExceptionTypes()) {
+				if (exceptionType == SyncException.class) {
 					if (async) {
-						System.out.println("[WARN] " + SyncException.class.getName() + " will never be thrown from \"" + method + "\".");
+						String exception = SyncException.class.getName();
+						String methodDescription = method.getName() + Type.getMethodDescriptor(method);
+						log.warn("[WARN] " + exception + " will never be thrown from \"" + methodDescription + "\".");
 					}
 					found = true;
 					break;
 				}
 			}
 			if (!found && !async) {
-				throw new IllegalStateException("[ERROR] " + SyncException.class.getName() + " is not declared on \"" + method + "\".");
+				String exception = SyncException.class.getName();
+				String methodDescription = method.getName() + Type.getMethodDescriptor(method);
+				throw new IllegalStateException("[ERROR] " + exception + " is not declared on \"" + methodDescription + "\".");
 			}
 			if ("HEAD".equals(verb) && responseType != null) {
-				throw new IllegalStateException("[ERROR] A \"HEAD\" request will never return a body with \"" + method + "\".");
+				String methodDescription = method.getName() + Type.getMethodDescriptor(method);
+				throw new IllegalStateException("[ERROR] A \"HEAD\" request will never return a body with \"" + methodDescription + "\".");
 			}
 		}
 
@@ -460,11 +479,13 @@ public final class RestBolt {
 		int[] types = new int[count];
 
 		Parameter[] params = method.getParameters();
-		int slotMax = 1;
+		int max = 1;
 		for (int i = 0, l = params.length; i < l; i++) {
 			Parameter parameter = params[i];
 			if (parameter.getType() == Map.class || parameter.getType() == List.class || parameter.getType().isArray()) {
-				System.out.println("[WARN] Not yet supported: " + method.getName() + Type.getMethodDescriptor(method) + " => " + parameter.getType());
+				String methodDescription = method.getName() + Type.getMethodDescriptor(method);
+				String parameterType = parameter.getType().getName();
+				log.warn("[WARN] Not yet supported: " + methodDescription + " => " + parameterType);
 				continue;
 			}
 			int type = UNUSED;
@@ -483,7 +504,8 @@ public final class RestBolt {
 					names[i] = header.value();
 					type |= HEADER;
 					if (!header.data().isEmpty()) {
-						throw new IllegalStateException("Dynamic @Header with static \"data\" in " + method.getName() + Type.getMethodDescriptor(method));
+						String methodDescription = method.getName() + Type.getMethodDescriptor(method);
+						throw new IllegalStateException("Dynamic @Header with static \"data\" in " + methodDescription);
 					}
 				} else if (annotationType == Body.class) {
 					Body body = (Body) annotation;
@@ -492,13 +514,14 @@ public final class RestBolt {
 				}
 			}
 			int sort = determineSort(parameter.getType());
-			types[i] = slotMax << SLOT_SHIFT | sort << SORT_SHIFT | type;
-			slotMax += size(sort);
-//			System.out.println(Integer.toBinaryString(types[i]));
+			types[i] = max << SLOT_SHIFT | sort << SORT_SHIFT | type;
+			max += size(sort);
 		}
 
-//		System.out.println("Parameters: " + Arrays.toString(names));
-//		System.out.println("Types: " + Arrays.toString(types));
+		if (log.isDebugEnabled()) {
+			log.debug("Parameters: " + Arrays.toString(names));
+			log.debug("Types: " + Arrays.toString(types));
+		}
 
 		MethodVisitor impl = writer.visitMethod(Modifier.PUBLIC | Modifier.FINAL, method.getName(), Type.getMethodDescriptor(method), null, exceptions);
 
@@ -541,7 +564,9 @@ public final class RestBolt {
 			if (!hasQuerySegment) {
 				hasQuerySegment = segment.indexOf('?') != -1;
 			}
-//			System.out.println("[STA] " + segment);
+			if (log.isDebugEnabled()) {
+				log.debug("[STA] " + segment);
+			}
 			impl.visitLdcInsn(segment);
 			impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
 
@@ -554,7 +579,9 @@ public final class RestBolt {
 
 			// dynamic segment.
 			String param = path.substring(start, end);
-//			System.out.println("[DYN] " + param);
+			if (log.isDebugEnabled()) {
+				log.debug("[DYN] " + param);
+			}
 			boolean found = false;
 			for (int i = 0, l = types.length; i < l; i++) {
 				int type = types[i];
@@ -581,7 +608,8 @@ public final class RestBolt {
 				}
 			}
 			if (!found) {
-				throw new IllegalStateException("Unknown path segment \"" + param + "\" on \"" + method + "\".");
+				String methodDescription = method.getName() + Type.getMethodDescriptor(method);
+				throw new IllegalStateException("Unknown path segment \"" + param + "\" on \"" + methodDescription + "\".");
 			}
 
 			start = end + 1;
@@ -593,7 +621,9 @@ public final class RestBolt {
 			if (!hasQuerySegment) {
 				hasQuerySegment = segment.indexOf('?') != -1;
 			}
-//			System.out.println("[STA] " + segment);
+			if (log.isDebugEnabled()) {
+				log.debug("[STA] " + segment);
+			}
 			impl.visitLdcInsn(segment);
 			impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
 		}
@@ -612,7 +642,9 @@ public final class RestBolt {
 				}
 
 				String query = names[i];
-//				System.out.println("query: \"" + query + "\".");
+				if (log.isDebugEnabled()) {
+					log.debug("query: \"" + query + "\".");
+				}
 				impl.visitLdcInsn(queryChar + URLEncoder.encode(query, StandardCharsets.UTF_8) + '=');
 				impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
 
@@ -672,8 +704,6 @@ public final class RestBolt {
 			}
 		}
 
-		// Do publisher shit...
-		// Call out to external code...
 		// The stack currently looks like this:
 		//
 		// [builder]
@@ -688,22 +718,17 @@ public final class RestBolt {
 			// Pull apart the publisher string into the component parts:
 			String owner;
 			String methodName;
-			String descriptor;
 
-			int methodStart = publisher.indexOf('.');
+			int methodStart = publisher.lastIndexOf('.');
 			owner = publisher.substring(0, methodStart).replace('/', '.');
-
-			int descriptorStart = publisher.indexOf('(', methodStart + 1);
-			methodName = publisher.substring(methodStart + 1, descriptorStart);
-			descriptor = publisher.substring(descriptorStart);
+			methodName = publisher.substring(methodStart + 1);
 
 			try {
-				// @TODO Jezza - 27 Nov. 2018: Accept a lookup as a parameter when binding. (As a user could provide a custom implementation that we don't have "access" to...)
-				Lookup lookup = MethodHandles.lookup();
+				// @MAYBE Jezza - 27 Nov. 2018: I think I've forgotten something here with module access...
 				Class<?> target = lookup.findClass(owner);
-				MethodType methodType = MethodType.fromMethodDescriptorString(descriptor, ClassLoader.getSystemClassLoader());
-				MethodHandle handle = lookup.findStatic(target, methodName, methodType);
-				handle.invokeExact(method, impl, names, types, slotMax);
+				Lookup bypass = MethodHandles.privateLookupIn(target, lookup);
+				MethodHandle handle = bypass.findStatic(target, methodName, PUBLISHER_FACTORY_SIGNATURE);
+				handle.invokeExact(method, impl, names, types, max);
 			} catch (Throwable t) {
 				throw new IllegalStateException(t);
 			}
@@ -726,7 +751,7 @@ public final class RestBolt {
 		// Finalise and construct the request.
 		impl.visitMethodInsn(INVOKEINTERFACE, REQUEST_BUILDER_INTERNAL, "method", '(' + STRING_DESCRIPTOR + PUBLISHER_DESCRIPTOR + ')' + REQUEST_BUILDER_DESCRIPTOR, true);
 		impl.visitMethodInsn(INVOKEINTERFACE, REQUEST_BUILDER_INTERNAL, "build", "()" + REQUEST_DESCRIPTOR, true);
-		impl.visitVarInsn(ASTORE, slotMax + 1);
+		impl.visitVarInsn(ASTORE, max + 1);
 
 		// Do handler shit...
 		if (responseType == String.class) {
@@ -737,12 +762,12 @@ public final class RestBolt {
 		} else {
 			impl.visitMethodInsn(INVOKESTATIC, Type.getInternalName(BodyHandlers.class), "discarding", "()" + HANDLER_DESCRIPTOR, false);
 		}
-		impl.visitVarInsn(ASTORE, slotMax + 2);
+		impl.visitVarInsn(ASTORE, max + 2);
 
 		impl.visitVarInsn(ALOAD, 0);
 		impl.visitMethodInsn(INVOKESPECIAL, generatedName, "client", "()" + CLIENT_DESCRIPTOR, false);
-		impl.visitVarInsn(ALOAD, slotMax + 1);
-		impl.visitVarInsn(ALOAD, slotMax + 2);
+		impl.visitVarInsn(ALOAD, max + 1);
+		impl.visitVarInsn(ALOAD, max + 2);
 
 		if (async) {
 			impl.visitMethodInsn(INVOKEVIRTUAL, CLIENT_INTERNAL, "sendAsync", '(' + REQUEST_DESCRIPTOR + HANDLER_DESCRIPTOR + ')' + Type.getDescriptor(CompletableFuture.class), false);
@@ -764,37 +789,37 @@ public final class RestBolt {
 
 	private static int op(int opcode, int sort) {
 //		System.out.println("opcode: " + opcode + ", sort: " + sort);
-		if (opcode == Opcodes.IALOAD || opcode == Opcodes.IASTORE) {
-			switch (sort) {
-				case BOOLEAN:
-				case BYTE:
-					return opcode + (Opcodes.BALOAD - Opcodes.IALOAD);
-				case CHAR:
-					return opcode + (Opcodes.CALOAD - Opcodes.IALOAD);
-				case SHORT:
-					return opcode + (Opcodes.SALOAD - Opcodes.IALOAD);
-				case INT:
-					return opcode;
-				case FLOAT:
-					return opcode + (Opcodes.FALOAD - Opcodes.IALOAD);
-				case LONG:
-					return opcode + (Opcodes.LALOAD - Opcodes.IALOAD);
-				case DOUBLE:
-					return opcode + (Opcodes.DALOAD - Opcodes.IALOAD);
-				case ARRAY:
-				case STRING:
-				case OBJECT:
-					return opcode + (Opcodes.AALOAD - Opcodes.IALOAD);
-				default:
-					throw new AssertionError();
-			}
-		}
+//		if (opcode == IALOAD || opcode == IASTORE) {
+//			switch (sort) {
+//				case BOOLEAN:
+//				case BYTE:
+//					return opcode + (BALOAD - IALOAD);
+//				case CHAR:
+//					return opcode + (CALOAD - IALOAD);
+//				case SHORT:
+//					return opcode + (SALOAD - IALOAD);
+//				case INT:
+//					return opcode;
+//				case FLOAT:
+//					return opcode + (FALOAD - IALOAD);
+//				case LONG:
+//					return opcode + (LALOAD - IALOAD);
+//				case DOUBLE:
+//					return opcode + (DALOAD - IALOAD);
+//				case ARRAY:
+//				case STRING:
+//				case OBJECT:
+//					return opcode + (AALOAD - IALOAD);
+//				default:
+//					throw new AssertionError();
+//			}
+//		}
 		switch (sort) {
 //			case VOID:
-//				if (opcode != Opcodes.IRETURN) {
+//				if (opcode != IRETURN) {
 //					throw new UnsupportedOperationException();
 //				}
-//				return Opcodes.RETURN;
+//				return RETURN;
 			case BOOLEAN:
 			case BYTE:
 			case CHAR:
@@ -802,18 +827,18 @@ public final class RestBolt {
 			case INT:
 				return opcode;
 			case FLOAT:
-				return opcode + (Opcodes.FRETURN - IRETURN);
+				return opcode + (FRETURN - IRETURN);
 			case LONG:
-				return opcode + (Opcodes.LRETURN - IRETURN);
+				return opcode + (LRETURN - IRETURN);
 			case DOUBLE:
-				return opcode + (Opcodes.DRETURN - IRETURN);
+				return opcode + (DRETURN - IRETURN);
 			case ARRAY:
 			case STRING:
 			case OBJECT:
-				if (opcode != Opcodes.ILOAD && opcode != Opcodes.ISTORE && opcode != IRETURN) {
+				if (opcode != ILOAD && opcode != ISTORE && opcode != IRETURN) {
 					throw new UnsupportedOperationException();
 				}
-				return opcode + (Opcodes.ARETURN - IRETURN);
+				return opcode + (ARETURN - IRETURN);
 			default:
 				throw new AssertionError();
 		}
@@ -891,16 +916,13 @@ public final class RestBolt {
 		client.visitMaxs(0, 0);
 	}
 
-	public static void buildNoBody(Method method, MethodVisitor impl, String[] names, int[] types, int slotMax) {
+	private static void buildNoBody(Method method, MethodVisitor impl, String[] names, int[] types, int max) {
 		impl.visitMethodInsn(INVOKESTATIC, Type.getInternalName(BodyPublishers.class), "noBody", "()" + PUBLISHER_DESCRIPTOR, false);
 	}
 
-	public static void buildURLEncoded(Method method, MethodVisitor impl, String[] names, int[] types, int slotMax) {
-		System.out.println("Method: " + method.getName() + Type.getMethodDescriptor(method));
-		System.out.println("Names: " + Arrays.toString(names));
-		System.out.println("Types: " + Arrays.toString(types));
+	private static void buildURLEncoded(Method method, MethodVisitor impl, String[] names, int[] types, int max) {
+		// [Builder]
 
-//		builder.header("Content-Type", "application/x-www-form-urlencoded");
 		impl.visitInsn(DUP);
 		impl.visitLdcInsn("Content-Type");
 		impl.visitLdcInsn("application/x-www-form-urlencoded");
@@ -912,6 +934,7 @@ public final class RestBolt {
 		impl.visitInsn(DUP);
 		impl.visitLdcInsn(32);
 		impl.visitMethodInsn(INVOKESPECIAL, Type.getInternalName(StringBuilder.class), "<init>", "(I)V", false);
+		// [Builder, StringBuilder]
 
 		for (int i = 0, l = types.length; i < l; i++) {
 			int type = types[i];
@@ -939,231 +962,11 @@ public final class RestBolt {
 			}
 		}
 
+		// [Builder, StringBuilder]
 		impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "toString", "()Ljava/lang/String;", false);
+		// [Builder, String]
 
 		impl.visitMethodInsn(INVOKESTATIC, Type.getInternalName(BodyPublishers.class), "ofString", "(Ljava/lang/String;)" + PUBLISHER_DESCRIPTOR, false);
-	}
-
-	public static void main(String[] args) throws SyncException {
-		// @TODO Jezza - 24 Nov. 2018:
-		// HttpMethods
-		// Body handlers
-		// Body publishers
-		// Sync try-catch -> SyncException
-		// StringBuilder optimisation -> new StringBuilder(32).append("/ping").toString();
-
-//		Runnable server = new Runnable() {
-//			@Override
-//			public void run() {
-//				try (ServerSocket socket = new ServerSocket(23123)) {
-//					try (Socket accepted = socket.accept()) {
-//						InputStream in = accepted.getInputStream();
-//						while (!accepted.isClosed()) {
-//							System.out.print((char) in.read());
-//						}
-//						System.out.println("Closed");
-//					}
-//				} catch (IOException e) {
-//					e.printStackTrace();
-//				}
-//			}
-//		};
-//		Thread thread = new Thread(server);
-//		thread.setDaemon(true);
-//		thread.start();
-
-		Service service = bind("http://localhost:8080", Service.class);
-//		int size = 100;
-//		List<CompletableFuture<?>> futures = new ArrayList<>(size);
-//		for (int i = 0; i < size; i++) {
-//			futures.add(service.pingAsync());
-//		}
-//		CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-//		System.out.println(service.count());
-
-//		System.out.println(service.touch(4L));
-//		System.out.println(service.touch(4L));
-		int count = 10_000;
-
-		CompletableFuture<?>[] futures = new CompletableFuture[count];
-		long start = System.nanoTime();
-		for (int i = 0; i < count; i++) {
-			futures[i] = service.createUser(i, "Jeremy", "Barrow");
-		}
-		long end = System.nanoTime();
-		System.out.println("Time: " + (end - start) + " ns");
-//
-		start = System.nanoTime();
-		int errors = 0;
-		int ok = 0;
-		for (CompletableFuture<?> future : futures) {
-			try {
-				future.join();
-				ok++;
-			} catch (Exception e) {
-				errors++;
-			}
-		}
-		end = System.nanoTime();
-		System.out.println("Ok: " + ok);
-		System.out.println("Errors: " + errors);
-		System.out.println("Total: " + (ok + errors));
-		System.out.println("Time: " + (end - start) + " ns");
-		System.out.println("Done!");
-		String size = service.size();
-		System.out.println(size);
-	}
-
-	public static final class ServiceImpl { // implements Service
-		private final URI host;
-		private volatile HttpClient client;
-
-		ServiceImpl(URI host) {
-			this.host = host;
-		}
-
-		private HttpClient client() {
-			HttpClient client = this.client;
-			if (client == null) {
-				synchronized (this) {
-					client = this.client;
-					if (client == null) {
-						this.client = client = HttpClient.newBuilder()
-								.build();
-					}
-				}
-			}
-			return client;
-		}
-
-		//		@Override
-		public String size() {
-			URI path = host.resolve("/size");
-			HttpRequest.Builder req = HttpRequest.newBuilder(path)
-					.method("GET", BodyPublishers.noBody());
-			BodyHandler<String> handler = BodyHandlers.ofString();
-			try {
-				return client().send(req.build(), handler)
-						.body();
-			} catch (IOException | InterruptedException e) {
-				return null;
-			}
-		}
-
-		//		@Override
-		public String name0(String id, String sort, String auth) {
-			StringBuilder b = new StringBuilder(32);
-			// %path%
-			b.append("/users/");
-			b.append(id);
-			b.append("/name");
-			// %path%
-
-			// %query%
-			b.append('?');
-
-			b.append("sort"); // = URLEncoder.encode("sort", StandardCharsets.UTF_8)
-			if (sort != null) {
-				b.append('=');
-				b.append(URLEncoder.encode(sort, StandardCharsets.UTF_8));
-			}
-			// %query%
-
-			URI uri = host.resolve(b.toString());
-
-			// %request%
-			Builder builder = HttpRequest.newBuilder(uri);
-			// %request%
-
-			// %header%
-			builder.header("Accept", "application/vnd.github.v3.full+json");
-			builder.header("User-Agent", "Retrofit-Sample-App");
-			builder.header("Auth", auth);
-			// %header%
-
-			// %publisher%
-			BodyPublisher publisher = BodyPublishers.noBody();
-			// method == GET
-			//   ? BodyPublishers.noBody()
-			//   : !!!!!publishers.get(String);!!!!!
-			// %publisher%
-
-			builder.method("GET", publisher);
-
-			HttpRequest request = builder.build();
-
-			// %handler%
-			BodyHandler<Void> handler = BodyHandlers.discarding();
-			// %handler%
-
-			// %return%sync
-			try {
-				HttpResponse<Void> response = client().send(request, handler);
-//				return response;
-			} catch (IOException | InterruptedException e) {
-//				throw new SyncException(e);
-			}
-			// %return%?sync
-
-			// %return%?async
-			CompletableFuture<HttpResponse<Void>> future = client().sendAsync(request, handler);
-//			return future;
-			// %return%?async
-
-			return null;
-		}
-	}
-
-	public interface Service {
-//		@GET("/size")
-//		String size();
-
-		@GET("/users/{user}/name")
-		@Header(value = "Accept", data = "application/vnd.github.v3.full+json")
-		@Header(value = "User-Agent", data = "Rest-Bolt-UserAgent")
-		CompletableFuture<HttpResponse<String>> name(@Path("user") String id, @Query("sort") String sort, @Header("Auth") String auth);
-
-		@GET("/touch/{id}")
-		String touch(@Path("id") long id) throws SyncException;
-
-		@GET("/send?name=Jeremy")
-		void sendJeremy(@Query("data") String data) throws SyncException;
-
-		@GET("/send")
-		void send(@Query("name") String name, @Query("data") String data) throws SyncException;
-
-		@GET("/ping")
-		void ping(@Header("User-Agent") String userAgent) throws SyncException;
-
-		@GET("/size")
-		String size() throws SyncException;
-
-		@GET("/ping")
-		CompletableFuture<?> pingAsync();
-
-		@GET("/ping")
-		void pingSync0() throws SyncException;
-
-		@GET("/count")
-		String count() throws SyncException;
-
-		@GET("/ping")
-		String pingSync1() throws SyncException;
-//		HttpResponse<String> pingSync1() throws SyncException;
-
-		@GET("/ping")
-		HttpResponse<?> pingSync2() throws SyncException;
-
-		@GET("/ping")
-		HttpResponse<Void> pingSync3() throws SyncException;
-
-		@GET("/asd")
-		CompletableFuture<?> pingAsync2(@Query("cache") long test0, @Header("cache_updated") long test1);
-
-		@POST("/users/{id}/create")
-		CompletableFuture<?> createUser(@Path("id") long id, @Body("first") String first, @Body("last") String last);
-
-//		@GET("/ping?timeout=10")
-//		void test(@Header("*") Map<String, String> headers, @Query("test") Map<String, String> query, @Query("test") List<String> mQuery) throws SyncException;
+		// [Builder, Publisher]
 	}
 }
