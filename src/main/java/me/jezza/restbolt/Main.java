@@ -1,7 +1,10 @@
 package me.jezza.restbolt;
 
 import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodHandles.Lookup;
 import java.net.http.HttpResponse;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 
@@ -11,16 +14,35 @@ import me.jezza.restbolt.annotations.Header;
 import me.jezza.restbolt.annotations.POST;
 import me.jezza.restbolt.annotations.Path;
 import me.jezza.restbolt.annotations.Query;
+import me.jezza.restbolt.annotations.RestService;
 
 /**
  * @author Jezza
  */
 public final class Main {
+	private static final Lookup LOOKUP = MethodHandles.lookup();
+
+	private static final Service SERVICE = RestBolt.bind("http://localhost:8080", Service.class, LOOKUP);
+	private static final Connection CONNECTION = RestBolt.bind("http://localhost:8080", Connection.class, LOOKUP);
+
 	private Main() {
 		throw new IllegalStateException();
 	}
 
+	public interface Connection extends RestService {
+		@GET("/{value}")
+		void transmit(@Path("value") String path, @Header("*") Map<String, String> queryMap, @Query("*") Map<String, String> headerMap) throws SyncException;
+	}
+
 	public static void main(String[] args) throws SyncException {
+		Map<String, String> queries = new HashMap<>();
+		Map<String, String> headers = new HashMap<>();
+
+		CONNECTION.transmit("poke", headers, queries);
+		CONNECTION.transmit("prod", headers, queries);
+	}
+
+	public static void main0(String[] args) throws SyncException {
 		// @TODO Jezza - 24 Nov. 2018:
 		// Body handlers
 		// Sync try-catch -> SyncException

@@ -76,6 +76,7 @@ import me.jezza.restbolt.annotations.POST;
 import me.jezza.restbolt.annotations.PUT;
 import me.jezza.restbolt.annotations.Path;
 import me.jezza.restbolt.annotations.Query;
+import me.jezza.restbolt.annotations.RestService;
 import me.jezza.restbolt.annotations.TRACE;
 
 /**
@@ -176,10 +177,9 @@ public final class RestBolt {
 		constructor.visitInsn(RETURN);
 		constructor.visitMaxs(0, 0);
 
-		// private HttpClient client();
-		buildClient(writer, generatedName);
+		// (public | private) HttpClient client();
+		buildClient(writer, generatedName, RestService.class.isAssignableFrom(type));
 
-		// all interface methods
 		long total = 0;
 		for (Method method : type.getDeclaredMethods()) {
 			String verb = null;
@@ -246,8 +246,9 @@ public final class RestBolt {
 					break;
 				}
 			}
+
 			if (verb == null) {
-				continue;
+				throw new IllegalStateException("Unknown method on interface: " + method.getName() + Type.getMethodDescriptor(method));
 			}
 
 			long start = System.nanoTime();
@@ -854,7 +855,7 @@ public final class RestBolt {
 				: 1;
 	}
 
-	private static void buildClient(ClassWriter writer, String generatedName) {
+	private static void buildClient(ClassWriter writer, String generatedName, boolean visible) {
 		//	private HttpClient client() {
 		//		HttpClient client = this.client;
 		//		if (client == null) {
@@ -869,7 +870,7 @@ public final class RestBolt {
 		//		}
 		//		return client;
 		//	}
-		MethodVisitor client = writer.visitMethod(Modifier.PRIVATE, "client", "()" + CLIENT_DESCRIPTOR, null, null);
+		MethodVisitor client = writer.visitMethod(visible ? Modifier.PUBLIC | Modifier.FINAL : Modifier.PRIVATE, "client", "()" + CLIENT_DESCRIPTOR, null, null);
 		client.visitVarInsn(ALOAD, 0);
 		client.visitFieldInsn(GETFIELD, generatedName, "client", CLIENT_DESCRIPTOR);
 		client.visitVarInsn(ASTORE, 1);
