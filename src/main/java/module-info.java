@@ -6,4 +6,7 @@ module rest.bolt {
 	requires jdk.unsupported;
 	requires org.objectweb.asm;
 	requires slf4j.api;
+
+	exports me.jezza.restbolt;
+	exports me.jezza.restbolt.annotations;
 }

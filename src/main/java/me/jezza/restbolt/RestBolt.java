@@ -92,6 +92,7 @@ public final class RestBolt {
 	public static final String PUBLISHER_URL_ENCODED = "me.jezza.restbolt.RestBolt.buildURLEncoded";
 
 	private static final String OBJECT_INTERNAL = "java/lang/Object";
+	private static final String EXCEPTION_INTERNAL = Type.getInternalName(SyncException.class);
 
 	private static final Type STRING_TYPE = Type.getType(String.class);
 	private static final String STRING_INTERNAL = STRING_TYPE.getInternalName();
@@ -778,7 +779,11 @@ public final class RestBolt {
 			impl.visitMethodInsn(INVOKEVIRTUAL, CLIENT_INTERNAL, "sendAsync", '(' + REQUEST_DESCRIPTOR + HANDLER_DESCRIPTOR + ')' + Type.getDescriptor(CompletableFuture.class), false);
 			impl.visitInsn(ARETURN);
 		} else {
+			Label catchStart = new Label();
+			impl.visitLabel(catchStart);
 			impl.visitMethodInsn(INVOKEVIRTUAL, CLIENT_INTERNAL, "send", '(' + REQUEST_DESCRIPTOR + HANDLER_DESCRIPTOR + ')' + RESPONSE_DESCRIPTOR, false);
+			Label catchEnd = new Label();
+			impl.visitLabel(catchEnd);
 			if (response) {
 				impl.visitInsn(ARETURN);
 			} else if (responseType != null) {
@@ -788,6 +793,19 @@ public final class RestBolt {
 			} else {
 				impl.visitInsn(RETURN);
 			}
+
+			Label catchHandler = new Label();
+			impl.visitLabel(catchHandler);
+			// Yes, I know, stomping locals, we're not gonna need them where we're going...
+			impl.visitVarInsn(ASTORE, 0);
+			impl.visitTypeInsn(NEW, EXCEPTION_INTERNAL);
+			impl.visitInsn(DUP);
+			impl.visitVarInsn(ALOAD, 0);
+			impl.visitMethodInsn(INVOKESPECIAL, EXCEPTION_INTERNAL, "<init>", "(Ljava/lang/Throwable;)V", false);
+			impl.visitInsn(ATHROW);
+
+			impl.visitTryCatchBlock(catchStart, catchEnd, catchHandler, Type.getInternalName(IOException.class));
+			impl.visitTryCatchBlock(catchStart, catchEnd, catchHandler, Type.getInternalName(InterruptedException.class));
 		}
 		impl.visitMaxs(0, 0);
 	}

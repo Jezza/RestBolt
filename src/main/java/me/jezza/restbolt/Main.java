@@ -34,20 +34,29 @@ public final class Main {
 		void transmit(@Path("value") String path, @Header("*") Map<String, String> queryMap, @Query("*") Map<String, String> headerMap) throws SyncException;
 	}
 
-	public static void main(String[] args) throws SyncException {
+	public static void main(String[] args) {
+		// @TODO Jezza - 24 Nov. 2018:
+		// Body handlers (Other than String and discarding...)
+		// Map types
+		// List types
+		// Array types
+		// StringBuilder optimisation -> new StringBuilder(32).append("/ping").toString();
+
 		Map<String, String> queries = new HashMap<>();
 		Map<String, String> headers = new HashMap<>();
 
-		CONNECTION.transmit("poke", headers, queries);
-		CONNECTION.transmit("prod", headers, queries);
+		try {
+			CONNECTION.transmit("poke", headers, queries);
+		} catch (SyncException ignored) {
+		}
+		try {
+			CONNECTION.transmit("prod", headers, queries);
+		} catch (SyncException e) {
+			e.printStackTrace();
+		}
 	}
 
 	public static void main0(String[] args) throws SyncException {
-		// @TODO Jezza - 24 Nov. 2018:
-		// Body handlers
-		// Sync try-catch -> SyncException
-		// StringBuilder optimisation -> new StringBuilder(32).append("/ping").toString();
-
 //		Binder<Service> binder = RestBolt.binder(Service.class, MethodHandles.lookup());
 //		Service service1 = binder.bind("http://localhost:8080");
 //		Service service2 = binder.bind("http://localhost:8081");
