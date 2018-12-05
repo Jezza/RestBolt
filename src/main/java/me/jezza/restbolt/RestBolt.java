@@ -57,6 +57,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Label;
@@ -265,11 +267,12 @@ public final class RestBolt {
 
 		String folder = System.getProperty(DEBUG_OUTPUT_FOLDER);
 		if (folder != null) {
-			String fileName = folder + generatedName.substring(generatedName.lastIndexOf('/') + 1) + ".class";
+			java.nio.file.Path file = Paths.get(folder, generatedName.substring(generatedName.lastIndexOf('/') + 1) + ".class");
+			log.info("Writing class file to \"" + file + "\".");
 			try {
-				Files.write(Paths.get(fileName), classData, StandardOpenOption.CREATE);
+				Files.write(file, classData, StandardOpenOption.CREATE);
 			} catch (IOException e) {
-				log.warn("Failed to write generated class data to \"" + fileName + "\".", e);
+				log.warn("Failed to write generated class data to \"" + file + "\".", e);
 			}
 		}
 
@@ -319,6 +322,8 @@ public final class RestBolt {
 	private static final int ARRAY = 9;
 	private static final int OBJECT = 10;
 	private static final int STRING = 11;
+	private static final int MAP = 12;
+	private static final int LIST = 13;
 
 	private static final int SORT_SHIFT = TYPE_SIZE - Integer.numberOfLeadingZeros(META_MASK);
 	private static final int SORT_MASK = 0b1111 << SORT_SHIFT;
@@ -340,6 +345,12 @@ public final class RestBolt {
 			}
 			if (type == String.class) {
 				return STRING;
+			}
+			if (Map.class.isAssignableFrom(type)) {
+				return MAP;
+			}
+			if (List.class.isAssignableFrom(type)) {
+				return LIST;
 			}
 			return OBJECT;
 		}
@@ -379,120 +390,48 @@ public final class RestBolt {
 			throw new IllegalStateException("Path must start with a '/'");
 		}
 
-		boolean async; // true, if the method is expecting the CompletableFuture that shall result from the call.
-		boolean response; // true, if the method is expecting the HttpResponse itself, and not just the value.
-		java.lang.reflect.Type responseType; // == null ? discarding
-		{
-			// Here be dragons...
-			// This isn't pretty, and I do want to pull it into a method, but I return three parameters, and I can't be fucked making a POJO for it, so Ima just leave it for now...
-			// I also don't want to put two booleans and a fucking pointer on the heap, just so I can return it...
-			// I want tuples... Rust as ruined me...
-			// Interestingly, this scope is actually the part that makes it too complex for IntelliJ to analyse.
-			// @TODO Jezza - 28 Nov. 2018: Yes, move this into another method _nicely_...
-			var returnType = method.getGenericReturnType();
-			if (returnType instanceof ParameterizedType) {
-				// Some parameterised type. (eg, Map<String, String>, List<String>, HttpResponse<?>, CompletableFuture<HttpResponse<String>>)
-				ParameterizedType parameterisedType = (ParameterizedType) returnType;
-				var raw = parameterisedType.getRawType();
-				if (raw == CompletableFuture.class) {
-					async = true;
-					response = false;
+		Runtime runtime = Runtime.getRuntime();
+		InspectResult inspection = inspect(method);
+		boolean async = inspection.async;
+		boolean response = inspection.response;
+		java.lang.reflect.Type responseType = inspection.responseType;
 
-					// This should always have at least one type parameter.
-					java.lang.reflect.Type[] arguments = parameterisedType.getActualTypeArguments();
-					if (arguments.length != 1) {
-						throw new AssertionError();
-					}
-					java.lang.reflect.Type argument = arguments[0];
-					String name = argument.getTypeName();
-					// If the type itself is a wildcard, then they couldn't give two shits about the response type, so we're just gonna discard the body and not care.
-					if (name.equals("?")) {
-						responseType = null;
-					} else if (name.startsWith(HTTP_RESPONSE)) {
-						if (!(argument instanceof ParameterizedType)) {
-							throw new AssertionError(HTTP_RESPONSE + " not parameterised.");
-						}
-						java.lang.reflect.Type[] responseArguments = ((ParameterizedType) argument).getActualTypeArguments();
-						if (responseArguments.length != 1) {
-							throw new AssertionError();
-						}
-						responseType = responseArguments[0];
-					} else {
-						// Check if the generic actually returns back a HttpResponse, as that's what the client returns, and the person writing the interface
-						// could have easily forgot and just wrote something like "CompletableFuture<String>" instead of "CompletableFuture<HttpResponse<String>>".
-						String methodDescription = method.getName() + Type.getMethodDescriptor(method);
-						throw new IllegalStateException("[ERROR] Return type must be of CompletableFuture<HttpResponse<_>> on \"" + methodDescription + "\".");
-					}
-				} else if (raw == HttpResponse.class) {
-					async = false;
-					response = true;
-					java.lang.reflect.Type[] responseArguments = parameterisedType.getActualTypeArguments();
-					if (responseArguments.length != 1) {
-						throw new AssertionError();
-					}
-					responseType = responseArguments[0];
-					String name = responseType.getTypeName();
-					if (name.equals("?") || name.equals(VOID)) {
-						responseType = null;
-					}
-				} else {
-					// This is just some parameterised type, like Map or List.
-					async = false;
-					response = false;
-					responseType = returnType;
+		boolean found = false;
+		for (Class<?> exceptionType : method.getExceptionTypes()) {
+			if (exceptionType == SyncException.class) {
+				if (async) {
+					String exception = SyncException.class.getName();
+					String methodDescription = method.getName() + Type.getMethodDescriptor(method);
+					log.warn("[WARN] " + exception + " will never be thrown from \"" + methodDescription + "\".");
 				}
-			} else {
-				async = false;
-				response = false;
-				responseType = returnType != Void.TYPE
-						? returnType
-						: null;
-			}
-
-			boolean found = false;
-			for (Class<?> exceptionType : method.getExceptionTypes()) {
-				if (exceptionType == SyncException.class) {
-					if (async) {
-						String exception = SyncException.class.getName();
-						String methodDescription = method.getName() + Type.getMethodDescriptor(method);
-						log.warn("[WARN] " + exception + " will never be thrown from \"" + methodDescription + "\".");
-					}
-					found = true;
-					break;
-				}
-			}
-			if (!found && !async) {
-				String exception = SyncException.class.getName();
-				String methodDescription = method.getName() + Type.getMethodDescriptor(method);
-				throw new IllegalStateException("[ERROR] " + exception + " is not declared on \"" + methodDescription + "\".");
-			}
-			if ("HEAD".equals(verb) && responseType != null) {
-				String methodDescription = method.getName() + Type.getMethodDescriptor(method);
-				throw new IllegalStateException("[ERROR] A \"HEAD\" request will never return a body with \"" + methodDescription + "\".");
+				found = true;
+				break;
 			}
 		}
-
-		Class<?>[] exceptionTypes = method.getExceptionTypes();
-		String[] exceptions = new String[exceptionTypes.length];
-		for (int i = 0, l = exceptionTypes.length; i < l; i++) {
-			exceptions[i] = Type.getInternalName(exceptionTypes[i]);
+		if (!found && !async) {
+			String exception = SyncException.class.getName();
+			String methodDescription = method.getName() + Type.getMethodDescriptor(method);
+			throw new IllegalStateException("[ERROR] " + exception + " is not declared on \"" + methodDescription + "\".");
 		}
-
-		int count = method.getParameterCount();
-
-		// Some String that is relevant based on the meta type.
-		String[] names = new String[count];
-		int[] types = new int[count];
+		if ("HEAD".equals(verb) && responseType != null) {
+			String methodDescription = method.getName() + Type.getMethodDescriptor(method);
+			throw new IllegalStateException("[ERROR] A \"HEAD\" request will never return a body with \"" + methodDescription + "\".");
+		}
 
 		Parameter[] params = method.getParameters();
-		int max = 1;
+		int count = params.length;
+
+		String[] names = new String[count];
+		int[] types = new int[count];
+		int max = 1; // Start at 1, because of the receiver ('this').
+
 		for (int i = 0, l = params.length; i < l; i++) {
 			Parameter parameter = params[i];
-			if (parameter.getType() == Map.class || parameter.getType() == List.class || parameter.getType().isArray()) {
+			int sort = determineSort(parameter.getType());
+			if (sort == MAP || sort == LIST || sort == ARRAY) {
 				String methodDescription = method.getName() + Type.getMethodDescriptor(method);
 				String parameterType = parameter.getType().getName();
 				log.warn("[WARN] Not yet supported: " + methodDescription + " => " + parameterType);
-				continue;
 			}
 			int type = UNUSED;
 			for (Annotation annotation : parameter.getAnnotations()) {
@@ -519,7 +458,6 @@ public final class RestBolt {
 					type |= BODY;
 				}
 			}
-			int sort = determineSort(parameter.getType());
 			types[i] = max << SLOT_SHIFT | sort << SORT_SHIFT | type;
 			max += size(sort);
 		}
@@ -529,7 +467,7 @@ public final class RestBolt {
 			log.debug("Types: " + Arrays.toString(types));
 		}
 
-		MethodVisitor impl = writer.visitMethod(Modifier.PUBLIC | Modifier.FINAL, method.getName(), Type.getMethodDescriptor(method), null, exceptions);
+		MethodVisitor impl = writer.visitMethod(Modifier.PUBLIC | Modifier.FINAL, method.getName(), Type.getMethodDescriptor(method), null, null);
 
 		// Load the host field for later. (I don't really use locals all that much...)
 		impl.visitVarInsn(ALOAD, 0);
@@ -556,39 +494,17 @@ public final class RestBolt {
 		//
 		// static: ["/users/", "/name"]
 		// dynamic: ["id"]
-		boolean hasQuerySegment = false;
-		int start = 0;
-		int end;
-		while (true) {
-			end = path.indexOf('{', start);
-			if (end == -1) {
-				break;
-			}
-
-			// static segment.
-			String segment = path.substring(start, end);
-			if (!hasQuerySegment) {
-				hasQuerySegment = segment.indexOf('?') != -1;
-			}
+		Consumer<String> statics = segment -> {
 			if (log.isDebugEnabled()) {
-				log.debug("[STA] " + segment);
+				log.debug("[STA] \"" + segment + '"');
 			}
 			impl.visitLdcInsn(segment);
 			impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
-
-			start = end + 1;
-
-			end = path.indexOf('}', start);
-			if (end == -1) {
-				throw new IllegalStateException("Unclosed '{' at position " + start);
-			}
-
-			// dynamic segment.
-			String param = path.substring(start, end);
+		};
+		Consumer<String> dynamics = param -> {
 			if (log.isDebugEnabled()) {
-				log.debug("[DYN] " + param);
+				log.debug("[DYN] \"" + param + '"');
 			}
-			boolean found = false;
 			for (int i = 0, l = types.length; i < l; i++) {
 				int type = types[i];
 				if ((type & META_MASK) == PATH) {
@@ -596,49 +512,120 @@ public final class RestBolt {
 					if (knownSegment != null && knownSegment.equals(param)) {
 						int sort = (type & SORT_MASK) >> SORT_SHIFT;
 						int slot = (type & SLOT_MASK) >> SLOT_SHIFT;
+						if (sort == ARRAY || sort == MAP || sort == LIST) {
+							throw new IllegalStateException("Not yet supported");
+						}
 
 						impl.visitVarInsn(op(ILOAD, sort), slot);
 						if (sort == STRING) {
 							impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
 						} else if (sort == OBJECT) {
 							impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(Ljava/lang/Object;)Ljava/lang/StringBuilder;", false);
-						} else if (sort == ARRAY) {
-							throw new IllegalStateException("Not yet supported: ARRAY");
 						} else {
 							char character = PRIMITIVE_DESCRIPTORS.charAt(sort);
 							impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(" + character + ")Ljava/lang/StringBuilder;", false);
 						}
-						found = true;
-						break;
+						return;
 					}
 				}
 			}
-			if (!found) {
-				String methodDescription = method.getName() + Type.getMethodDescriptor(method);
-				throw new IllegalStateException("Unknown path segment \"" + param + "\" on \"" + methodDescription + "\".");
-			}
+			String methodDescription = method.getName() + Type.getMethodDescriptor(method);
+			throw new IllegalStateException("Unknown path segment \"" + param + "\" on \"" + methodDescription + "\".");
+		};
+		segment(path, statics, dynamics);
 
-			start = end + 1;
-		}
-
-		// static segment (Just the remaining stuff)
-		if (start != path.length()) {
-			String segment = path.substring(start);
-			if (!hasQuerySegment) {
-				hasQuerySegment = segment.indexOf('?') != -1;
-			}
-			if (log.isDebugEnabled()) {
-				log.debug("[STA] " + segment);
-			}
-			impl.visitLdcInsn(segment);
-			impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
-		}
+		boolean hasQuerySegment = path.indexOf('?') != -1;
 
 		// Insert the query parameters.
 		// While we were checking and adding the path segments, we also checked if there was a '?', if there was, the path contains a hardcoded query segment
 		for (int i = 0, l = types.length; i < l; i++) {
 			int type = types[i];
 			if ((type & META_MASK) == QUERY) {
+				String query = names[i];
+				if (log.isDebugEnabled()) {
+					log.debug("query: \"" + query + "\".");
+				}
+				int sort = (type & SORT_MASK) >> SORT_SHIFT;
+				int slot = (type & SLOT_MASK) >> SLOT_SHIFT;
+
+//				if (sort == MAP) {
+//					if (query.equals("*")) {
+//						// wildcard
+//						if (hasQuerySegment) {
+//							// wildcard:append
+//						} else {
+//							// wildcard:first
+//						}
+//					} else {
+//
+//						int start0 = 0;
+//						int end0;
+//						while ((end0 = query.indexOf(',', start0)) != -1) {
+//							if (start0 == end0) {
+//								++start0;
+//								continue;
+//							}
+//							String key = query.substring(start0, end0);
+//							System.out.println('"' + key + '"');
+//							char queryChar;
+//							if (!hasQuerySegment) {
+//								hasQuerySegment = true;
+//								queryChar = '?';
+//							} else {
+//								queryChar = '&';
+//							}
+//
+//							impl.visitLdcInsn(queryChar + URLEncoder.encode(key, StandardCharsets.UTF_8) + '=');
+//							impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
+//
+//							impl.visitVarInsn(ALOAD, slot);
+//							impl.visitLdcInsn(key);
+//							impl.visitMethodInsn(INVOKEINTERFACE, Type.getInternalName(Map.class), "get", "(Ljava/lang/Object;)Ljava/lang/Object;", true);
+//							impl.visitTypeInsn(CHECKCAST, STRING_INTERNAL);
+//
+//							encodeString(impl);
+//							impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
+//
+//							start0 = end0 + 1;
+//						}
+//						if (start0 != query.length()) {
+//							String key = query.substring(start0);
+//							System.out.println('"' + key + '"');
+//							char queryChar;
+//							if (!hasQuerySegment) {
+//								hasQuerySegment = true;
+//								queryChar = '?';
+//							} else {
+//								queryChar = '&';
+//							}
+//
+//							impl.visitLdcInsn(queryChar + URLEncoder.encode(key, StandardCharsets.UTF_8) + '=');
+//							impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
+//
+//							impl.visitVarInsn(ALOAD, slot);
+//							impl.visitLdcInsn(key);
+//							impl.visitMethodInsn(INVOKEINTERFACE, Type.getInternalName(Map.class), "get", "(Ljava/lang/Object;)Ljava/lang/Object;", true);
+//							impl.visitTypeInsn(CHECKCAST, STRING_INTERNAL);
+//
+//							encodeString(impl);
+//							impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
+//						}
+//						// fixed
+//						if (hasQuerySegment) {
+//							// fixed:append
+//
+//						} else {
+//							// fixed:first
+//						}
+//					}
+////					throw new IllegalStateException();
+//					continue;
+//				}
+				if (sort == ARRAY || sort == OBJECT || sort == LIST || sort == MAP) {
+					log.warn("Support not yet added :: " + sort);
+					continue;
+				}
+
 				char queryChar;
 				if (!hasQuerySegment) {
 					hasQuerySegment = true;
@@ -647,24 +634,12 @@ public final class RestBolt {
 					queryChar = '&';
 				}
 
-				String query = names[i];
-				if (log.isDebugEnabled()) {
-					log.debug("query: \"" + query + "\".");
-				}
 				impl.visitLdcInsn(queryChar + URLEncoder.encode(query, StandardCharsets.UTF_8) + '=');
 				impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
 
-				int sort = (type & SORT_MASK) >> SORT_SHIFT;
-				int slot = (type & SLOT_MASK) >> SLOT_SHIFT;
-
 				impl.visitVarInsn(op(ILOAD, sort), slot);
-				if (sort == ARRAY || sort == STRING || sort == OBJECT) {
-					if (sort != STRING) {
-						throw new IllegalStateException("Support not yet added :: " + sort);
-//						impl.visitMethodInsn(INVOKESTATIC, Type.getInternalName(Integer.class), "toString", "(I)Ljava/lang/String;", false);
-					}
-					impl.visitFieldInsn(GETSTATIC, Type.getInternalName(StandardCharsets.class), "UTF_8", Type.getDescriptor(Charset.class));
-					impl.visitMethodInsn(INVOKESTATIC, Type.getInternalName(URLEncoder.class), "encode", "(Ljava/lang/String;Ljava/nio/charset/Charset;)Ljava/lang/String;", false);
+				if (sort == STRING) {
+					encodeString(impl);
 					impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
 				} else {
 					char character = PRIMITIVE_DESCRIPTORS.charAt(sort);
@@ -675,7 +650,7 @@ public final class RestBolt {
 
 		// We've finished building the URI, and now we just convert it to a string, and resolve it against the host.
 		impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "toString", "()Ljava/lang/String;", false);
-		impl.visitMethodInsn(INVOKEVIRTUAL, URI_INTERNAL, "resolve", "(Ljava/lang/String;)".concat(URI_DESCRIPTOR), false);
+		impl.visitMethodInsn(INVOKEVIRTUAL, URI_INTERNAL, "resolve", "(Ljava/lang/String;)" + URI_DESCRIPTOR, false);
 
 		// %request%
 		impl.visitMethodInsn(INVOKESTATIC, REQUEST_INTERNAL, "newBuilder", '(' + URI_DESCRIPTOR + ')' + REQUEST_BUILDER_DESCRIPTOR, false);
@@ -693,15 +668,16 @@ public final class RestBolt {
 		for (int i = 0, l = types.length; i < l; i++) {
 			int type = types[i];
 			if ((type & META_MASK) == HEADER) {
-				impl.visitLdcInsn(names[i]);
-
 				int sort = (type & SORT_MASK) >> SORT_SHIFT;
 				int slot = (type & SLOT_MASK) >> SLOT_SHIFT;
 
-				impl.visitVarInsn(op(ILOAD, sort), slot);
-				if (sort == ARRAY) {
-					throw new IllegalStateException("Support not yet added :: " + sort);
+				if (sort == ARRAY || sort == MAP || sort == LIST || sort == OBJECT) {
+					log.warn("Support not yet added :: " + sort);
+					continue;
 				}
+
+				impl.visitLdcInsn(names[i]);
+				impl.visitVarInsn(op(ILOAD, sort), slot);
 				if (sort != STRING) {
 					char character = PRIMITIVE_DESCRIPTORS.charAt(sort);
 					impl.visitMethodInsn(INVOKESTATIC, STRING_INTERNAL, "valueOf", "(" + character + ')' + STRING_DESCRIPTOR, false);
@@ -830,6 +806,8 @@ public final class RestBolt {
 //				case DOUBLE:
 //					return opcode + (DALOAD - IALOAD);
 //				case ARRAY:
+//				case MAP:
+//				case LIST:
 //				case STRING:
 //				case OBJECT:
 //					return opcode + (AALOAD - IALOAD);
@@ -856,6 +834,8 @@ public final class RestBolt {
 			case DOUBLE:
 				return opcode + (DRETURN - IRETURN);
 			case ARRAY:
+			case MAP:
+			case LIST:
 			case STRING:
 			case OBJECT:
 				if (opcode != ILOAD && opcode != ISTORE && opcode != IRETURN) {
@@ -939,6 +919,102 @@ public final class RestBolt {
 		client.visitMaxs(0, 0);
 	}
 
+	private static final class InspectResult {
+		/**
+		 * true, if the method is expecting the CompletableFuture that shall result from the call.
+		 */
+		private final boolean async;
+
+		/**
+		 * true, if the method is expecting the HttpResponse itself, and not just the value.
+		 */
+		private final boolean response;
+
+		/**
+		 * == null ? discarding
+		 */
+		private final java.lang.reflect.Type responseType;
+
+		InspectResult(boolean async, boolean response, java.lang.reflect.Type responseType) {
+			this.async = async;
+			this.response = response;
+			this.responseType = responseType;
+		}
+	}
+
+	private static InspectResult inspect(Method method) {
+		boolean async; // 
+		boolean response;
+		java.lang.reflect.Type responseType;
+
+		// I want tuples... Rust as ruined me...
+		// Here be dragons...
+		var returnType = method.getGenericReturnType();
+		if (returnType instanceof ParameterizedType) {
+			// Some parameterised type. (eg, Map<String, String>, List<String>, HttpResponse<?>, CompletableFuture<HttpResponse<String>>)
+			ParameterizedType parameterisedType = (ParameterizedType) returnType;
+			var raw = parameterisedType.getRawType();
+			if (raw == CompletableFuture.class) {
+				async = true;
+				response = false;
+
+				// This should always have at least one type parameter.
+				java.lang.reflect.Type[] arguments = parameterisedType.getActualTypeArguments();
+				if (arguments.length != 1) {
+					throw new AssertionError();
+				}
+				java.lang.reflect.Type argument = arguments[0];
+				String name = argument.getTypeName();
+				// If the type itself is a wildcard, then they couldn't give two shits about the response type, so we're just gonna discard the body and not care.
+				if (name.equals("?")) {
+					responseType = null;
+				} else if (name.startsWith(HTTP_RESPONSE)) {
+					if (!(argument instanceof ParameterizedType)) {
+						throw new AssertionError(HTTP_RESPONSE + " not parameterised.");
+					}
+					java.lang.reflect.Type[] responseArguments = ((ParameterizedType) argument).getActualTypeArguments();
+					if (responseArguments.length != 1) {
+						throw new AssertionError();
+					}
+					responseType = responseArguments[0];
+					name = responseType.getTypeName();
+					if (name.equals("?") || name.equals(VOID)) {
+						responseType = null;
+					}
+				} else {
+					// Check if the generic actually returns back a HttpResponse, as that's what the client returns, and the person writing the interface
+					// could have easily forgot and just wrote something like "CompletableFuture<String>" instead of "CompletableFuture<HttpResponse<String>>".
+					String methodDescription = method.getName() + Type.getMethodDescriptor(method);
+					throw new IllegalStateException("[ERROR] Return type must be of CompletableFuture<HttpResponse<_>> on \"" + methodDescription + "\".");
+				}
+			} else if (raw == HttpResponse.class) {
+				async = false;
+				response = true;
+				java.lang.reflect.Type[] responseArguments = parameterisedType.getActualTypeArguments();
+				if (responseArguments.length != 1) {
+					throw new AssertionError();
+				}
+				responseType = responseArguments[0];
+				String name = responseType.getTypeName();
+				if (name.equals("?") || name.equals(VOID)) {
+					responseType = null;
+				}
+			} else {
+				// This is just some parameterised type, like Map or List.
+				async = false;
+				response = false;
+				responseType = returnType;
+			}
+		} else {
+			async = false;
+			response = false;
+			responseType = returnType != Void.TYPE
+					? returnType
+					: null;
+		}
+		return new InspectResult(async, response, responseType);
+	}
+
 	private static void buildNoBody(Method method, MethodVisitor impl, String[] names, int[] types, int max) {
 		impl.visitMethodInsn(INVOKESTATIC, Type.getInternalName(BodyPublishers.class), "noBody", "()" + PUBLISHER_DESCRIPTOR, false);
 	}
@@ -962,21 +1038,20 @@ public final class RestBolt {
 		for (int i = 0, l = types.length; i < l; i++) {
 			int type = types[i];
 			if ((type & META_MASK) == BODY) {
+				int sort = (type & SORT_MASK) >> SORT_SHIFT;
+				int slot = (type & SLOT_MASK) >> SLOT_SHIFT;
+
+				if (sort == ARRAY || sort == OBJECT || sort == MAP || sort == LIST) {
+					log.warn("Support not yet added :: " + sort);
+					continue;
+				}
 				// We abuse that form body parsers split on ampersands. (That way we don't have to track which body part is the last...)
 				impl.visitLdcInsn('&' + URLEncoder.encode(names[i], StandardCharsets.UTF_8) + '=');
 				impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
 
-				int sort = (type & SORT_MASK) >> SORT_SHIFT;
-				int slot = (type & SLOT_MASK) >> SLOT_SHIFT;
-
 				impl.visitVarInsn(op(ILOAD, sort), slot);
-				if (sort == ARRAY || sort == STRING || sort == OBJECT) {
-					if (sort != STRING) {
-						throw new IllegalStateException("Support not yet added :: " + sort);
-//						impl.visitMethodInsn(INVOKESTATIC, Type.getInternalName(Integer.class), "toString", "(I)Ljava/lang/String;", false);
-					}
-					impl.visitFieldInsn(GETSTATIC, Type.getInternalName(StandardCharsets.class), "UTF_8", Type.getDescriptor(Charset.class));
-					impl.visitMethodInsn(INVOKESTATIC, Type.getInternalName(URLEncoder.class), "encode", "(Ljava/lang/String;Ljava/nio/charset/Charset;)Ljava/lang/String;", false);
+				if (sort == STRING) {
+					encodeString(impl);
 					impl.visitMethodInsn(INVOKEVIRTUAL, Type.getInternalName(StringBuilder.class), "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
 				} else {
 					char character = PRIMITIVE_DESCRIPTORS.charAt(sort);
@@ -991,5 +1066,65 @@ public final class RestBolt {
 
 		impl.visitMethodInsn(INVOKESTATIC, Type.getInternalName(BodyPublishers.class), "ofString", "(Ljava/lang/String;)" + PUBLISHER_DESCRIPTOR, false);
 		// [Builder, Publisher]
+	}
+
+	private static final String STANDARD_CHARSETS_INTERNAL = "java/nio/charset/StandardCharsets";
+
+	private static final String CHARSET_INTERNAL = "java/nio/charset/Charset";
+	private static final String CHARSET_DESCRIPTOR = 'L' + CHARSET_INTERNAL + ';';
+
+	private static final String URL_ENCODER_INTERNAL = "java/net/URLEncoder";
+
+	private static void encodeString(MethodVisitor impl) {
+		// A string needs to be sitting on top of the stack...
+		impl.visitFieldInsn(GETSTATIC, STANDARD_CHARSETS_INTERNAL, "UTF_8", CHARSET_DESCRIPTOR);
+		impl.visitMethodInsn(INVOKESTATIC, URL_ENCODER_INTERNAL, "encode", "(Ljava/lang/String;Ljava/nio/charset/Charset;)Ljava/lang/String;", false);
+	}
+
+	private static boolean split(String input, Predicate<? super String> operation) {
+		int start0 = 0;
+		int end0;
+		while ((end0 = input.indexOf(',', start0)) != -1) {
+			if (start0 == end0) {
+				++start0;
+				continue;
+			}
+			String key = input.substring(start0, end0).trim();
+			if (operation.test(key)) {
+				return true;
+			}
+			start0 = end0 + 1;
+		}
+		if (start0 != input.length()) {
+			String key = input.substring(start0).trim();
+			return operation.test(key);
+		}
+		return false;
+	}
+
+	private static void segment(String input, Consumer<? super String> statics, Consumer<? super String> dynamics) {
+		int start = 0;
+		int end;
+		while ((end = input.indexOf('{', start)) != -1) {
+			// Everything up to the first opening brace.
+			String segment = input.substring(start, end);
+			statics.accept(segment);
+			start = end + 1;
+
+			end = input.indexOf('}', start);
+			if (end == -1) {
+				throw new IllegalStateException("Unclosed '{' at position " + start);
+			}
+
+			// The segment inbetween the opening and closing brace. 
+			String param = input.substring(start, end);
+			dynamics.accept(param);
+			start = end + 1;
+		}
+
+		if (start != input.length()) {
+			String segment = input.substring(start);
+			statics.accept(segment);
+		}
 	}
 }
