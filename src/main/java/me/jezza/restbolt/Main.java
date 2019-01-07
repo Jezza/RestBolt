@@ -12,15 +12,15 @@ import java.net.http.HttpRequest.Builder;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandler;
 import java.net.http.HttpResponse.BodyHandlers;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Scanner;
 import java.util.concurrent.CompletableFuture;
 
+import me.jezza.restbolt.annotations.Body;
 import me.jezza.restbolt.annotations.GET;
-import me.jezza.restbolt.annotations.Header;
-import me.jezza.restbolt.annotations.Path;
+import me.jezza.restbolt.annotations.POST;
 import me.jezza.restbolt.annotations.Query;
 import me.jezza.restbolt.annotations.RestService;
 
@@ -30,15 +30,40 @@ import me.jezza.restbolt.annotations.RestService;
 public final class Main {
 	private static final Lookup LOOKUP = MethodHandles.lookup();
 
-	private static final Service SERVICE = RestBolt.bind("http://localhost:8080", Service.class, LOOKUP);
+//	private static final Service SERVICE = RestBolt.bind("http://localhost:8080", Service.class, LOOKUP);
 
 	private Main() {
 		throw new IllegalStateException();
 	}
 
 	public interface Service extends RestService {
-		@GET("/{value}")
-		CompletableFuture<?> transmit(@Path("value") String path, @Header("*") Map<String, String> headerMap, @Query("first, middle?, last?name") Map<String, String> queryMap) throws SyncException;
+		//		@GET("/{value}")
+//		CompletableFuture<?> transmit(@Path("value") String path, @Header("*") Map<String, String> headerMap, @Query("first, middle?, last?name") Map<String, String> queryMap) throws SyncException;
+//
+		@GET("/ping")
+		CompletableFuture<?> ping();
+//
+//		@GET("/users/{id}/name")
+//		String name(@Path("id") String id) throws SyncException;
+
+		@POST(value = "/users/create", publisher = RestBolt.PUBLISHER_MULTIPART)
+		void create(@Body("username") String name) throws SyncException;
+	}
+
+//	public static void main(String[] args) throws IOException {
+//		ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_FRAMES);
+//		writer.visit(V11, ACC_PUBLIC | ACC_FINAL, "Main", null, null, null);
+//		writer.visitEnd();
+//
+//		byte[] data = writer.toByteArray();
+//		Files.write(Paths.get("C:\\Users\\Jezza\\Desktop\\JavaProjects\\rest-bolt\\Main.class"), data);
+//	}
+
+	private static final Service SERVICE = RestBolt.bind("http://localhost:8080", Service.class, LOOKUP);
+
+	public static void main0(String[] args) {
+//		nuke();
+		ping();
 	}
 
 	public static void main(String[] args) {
@@ -47,20 +72,64 @@ public final class Main {
 		// Map types
 		// List types
 		// Array types
-		// StringBuilder optimisation -> new StringBuilder(32).append("/ping").toString();
 
-		Map<String, String> queries = new HashMap<>();
-		Map<String, String> headers = new HashMap<>();
+		try (Scanner in = new Scanner(System.in)) {
 
-		try {
-			SERVICE.transmit("poke", headers, queries);
-		} catch (SyncException ignored) {
+			loop: while (true) {
+				String line = in.nextLine();
+				if (line == null) {
+					break;
+				}
+				switch (line) {
+					case "e":
+					case "exit":
+						break loop;
+					case "n":
+					case "nuke":
+						nuke();
+						break;
+					case "p":
+					case "ping":
+						ping();
+				}
+			}
 		}
+
+//		Map<String, String> queries = new HashMap<>();
+//		Map<String, String> headers = new HashMap<>();
+
+//		try {
+//			SERVICE.transmit("poke", headers, queries);
+//		} catch (SyncException ignored) {
+//		}
+//		try {
+//			SERVICE.transmit("prod", headers, queries);
+//		} catch (SyncException e) {
+//			e.printStackTrace();
+//		}
+	}
+
+	private static void nuke() {
 		try {
-			SERVICE.transmit("prod", headers, queries);
+			SERVICE.create("jezza");
 		} catch (SyncException e) {
 			e.printStackTrace();
 		}
+//		SERVICE.create("jezza")
+//				.exceptionally(t -> {
+//					t.printStackTrace();
+//					return null;
+//				})
+//				.join();
+	}
+
+	private static void ping() {
+		SERVICE.ping()
+				.exceptionally(t -> {
+					t.printStackTrace();
+					return null;
+				})
+				.join();
 	}
 
 	public static final class ServiceImpl { // implements Connection
@@ -85,7 +154,8 @@ public final class Main {
 			}
 			return client;
 		}
-//
+
+		//
 		public void transmit(String path, Map<String, String> headerMap, @Query("first,last") Map<String, String> queryMap) throws SyncException {
 			StringBuilder b = new StringBuilder(32);
 			// %path%
